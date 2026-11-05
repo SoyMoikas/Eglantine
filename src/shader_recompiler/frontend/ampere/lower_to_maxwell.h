@@ -193,7 +193,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
     for (const auto& instruction : code) {
         const u32 op = instruction.Bits(0, 12);
         uses_uniform_bank |= op == 0x3c4 || op == 0x2bd || op == 0x896 || op == 0xf60 || op == 0xc11 || op == 0xd08 || op == 0xc0c || op == 0x986 || op == 0x9a8 || op == 0xc12 || op == 0xc17 || op == 0xe24 || op == 0xc24 || op == 0xd00 || op == 0xd09 || op == 0x9c3 || op == 0xc45 || op == 0x2a4 || op == 0x891 || op == 0x890 || op == 0x290 || op == 0x28c || op == 0x88c || op == 0x287 || op == 0x887 || op == 0x958 || op == 0xab9 || op == 0xabb || op == 0x899 || op == 0xc20 || op == 0xe21 || op == 0xe23 || op == 0xc02 ||
-                             op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || (op == 0x988 && instruction.Bits(91, 1)) || (op == 0x987 && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xf63 || op == 0xf66 || op == 0xf69 || op == 0xc0b || op == 0x8a5 || op == 0x299 || op == 0xc09 || (op == 0x81c && instruction.Bits(67, 1)) || op == 0xc0a ||
+                             op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || (op == 0x988 && instruction.Bits(91, 1)) || ((op == 0x983 || op == 0x987) && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xf63 || op == 0xf66 || op == 0xf69 || op == 0xc0b || op == 0x8a5 || op == 0x299 || op == 0xc09 || (op == 0x81c && instruction.Bits(67, 1)) || op == 0xc0a ||
                              (op == 0x83b && instruction.Bits(91, 1));
     }
     const auto address_of = [](u32 index) { return 0x50U + index * 8 + ((index + 1) / 3) * 8; };
@@ -2445,20 +2445,22 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         case 0x387: case 0x983: case 0x987: { // Local spill at [Ra + immediate byte offset].
             // The size is bits 73-75 (0-3 = U8, S8, U16, S16, then 4, 5, 6 = 32, 64, 128 bits), as
             // Maxwell's; wider accesses become 32-bit ones. A load's bit 85 (.LU) is a cache hint.
-            // 0x987 is the store with bit 91 adding a uniform register (bits 64-71), as 0x988 does
-            // for STS (Kirby Air Riders' menu fragment shaders: STL.128 [UR8+0x40], R4).
+            // Bit 91 adds a uniform register, in bits 32-39 for the load and 64-71 for the store
+            // (0x987), as LDS/STS do (Kirby Air Riders' menu fragment shaders:
+            // STL.128 [UR8+0x40], R4 and LDL R51, [UR8+0x6c]).
             const bool store = opcode != 0x983;
-            const bool uniform_base = opcode == 0x987;
-            const u32 base_register = uniform_base ? (insn.Bits(91, 1) ? uniform_register(insn.Bits(64, 8)) : ~0U) : 255U;
+            const bool uniform_base = opcode != 0x387 && insn.Bits(91, 1);
+            const u32 base_register = uniform_base ? uniform_register(insn.Bits(store ? 64 : 32, 8))
+                                                   : opcode == 0x987 ? ~0U : 255U;
             const u32 size = insn.Bits(73, 3);
-            const u32 data = insn.Bits(32, 8), offset = insn.Bits(40, 24);
+            const u32 data = store || !uniform_base ? insn.Bits(32, 8) : 0U, offset = insn.Bits(40, 24);
             u32 address = insn.Bits(24, 8);
             const u32 words = size == 6 ? 4 : size == 5 ? 2 : 1, value = store ? data : static_cast<u32>(dest);
             const u32 alignment = size < 2 ? 1U : size < 4 ? 2U : 4U;
             if ((address != 255 && address >= 246) || (store && insn.Bits(16, 8)) || (!store && data) ||
                 (value != 255 && (value + words > 248 || (value & (words - 1)))) || (!store && value == 255) ||
                 (offset & (alignment - 1)) || offset + 4 * words > 0x800000 || size > 6 ||
-                (insn.words[2] & ~(store ? 0xe00U : 0x200e00U) & ~(uniform_base ? 0x080000ffU : 0U)) != 0x00100000U ||
+                (insn.words[2] & ~(store ? 0xe00U : 0x200e00U) & ~(uniform_base ? (store ? 0x080000ffU : 0x08000000U) : 0U)) != 0x00100000U ||
                 base_register == ~0U)
                 return fail(index, "native local scalar spill mode");
             if (base_register != 255) {
