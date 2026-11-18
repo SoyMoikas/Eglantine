@@ -224,7 +224,26 @@ bool Maxwell3D::IsMethodExecutable(u32 method) {
     }
 }
 
+namespace {
+/// True when `method` is the call method (an even macro register) of a macro other than the one
+/// collecting parameters; writes to the current macro's own registers continue its call.
+constexpr bool StartsAnotherMacro(u32 executing_macro, u32 method) {
+    return executing_macro != 0 && method >= MacroRegistersStart && method % 2 == 0 &&
+           method != executing_macro && method != executing_macro + 1;
+}
+} // namespace
+
 void Maxwell3D::ProcessMacro(Core::System& system, u32 method, const u32* base_start, u32 amount, bool is_last_call) {
+    if (StartsAnotherMacro(executing_macro, method)) {
+        // An incrementing run can call several macros back to back (Kirby Air Riders:
+        // 0xe10, 0xe11, 0xe12, ...): a write to another macro's call method ends the
+        // current call, which runs with the parameters collected so far.
+        ConsumeSink(system);
+        CallMacroMethod(system, executing_macro, macro_params);
+        macro_params.clear();
+        macro_segments.clear();
+        current_macro_dirty = false;
+    }
     if (executing_macro == 0) {
         // A macro call must begin by writing the macro method's register, not its argument.
         ASSERT((method % 2) == 0 && "Can't start macro execution by writing to the ARGS register");
@@ -726,10 +745,10 @@ size_t Maxwell3D::CallStateMethodRun(const u64* entry, size_t max_words) {
 void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
     // It is an error to write to a register other than the current macro's ARG register before
     // it has finished execution.
-    if (executing_macro != 0 && method != executing_macro + 1) {
+    // A write to another macro's call method is allowed: ProcessMacro runs the current call first.
+    if (executing_macro != 0 && method != executing_macro + 1 &&
+        !StartsAnotherMacro(executing_macro, method)) {
         DumpRecentWrites(method);
-    }
-    if (executing_macro != 0) {
         ASSERT(method == executing_macro + 1);
     }
     RecordWrite(method, method_argument, 1, is_last_call ? 1 : 2);
@@ -1703,6 +1722,9 @@ void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& spl
                                 u32 argument, bool is_last_call) {
     auto& fs = Front(system, split);
     if (method >= MacroRegistersStart) {
+        if (StartsAnotherMacro(fs.executing_macro, method)) {
+            FrontRunMacro(system, split, fs); // As ProcessMacro: one run, several macro calls.
+        }
         if (fs.executing_macro == 0) {
             fs.executing_macro = method;
         }
@@ -1757,6 +1779,9 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
                           method, amount, differences);
             }
             return;
+        }
+        if (StartsAnotherMacro(fs.executing_macro, method)) {
+            FrontRunMacro(system, split, fs);
         }
         if (fs.executing_macro == 0) {
             fs.executing_macro = method;
