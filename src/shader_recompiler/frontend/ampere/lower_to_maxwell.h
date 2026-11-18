@@ -155,6 +155,10 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     }
     case 0x387: case 0x983:
         operand(opcode == 0x387 ? 32 : 16); operand(24); break;
+    case 0x987: { // STL with a uniform base
+        const u32 width = input.Bits(73, 3), count = width == 6 ? 4 : width == 5 ? 2 : 1;
+        operand(32, count); operand(24); break;
+    }
     case 0x981: case 0x986: {
         const u32 width = input.Bits(73, 3), count = width == 6 ? 4 : width == 5 ? 2 : 1;
         operand(opcode == 0x981 ? 16 : 32, count);
@@ -280,7 +284,7 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
         const u32 op = instruction.Bits(0, 12);
         uses_uniform_bank |= op == 0x4a4 || op == 0x2bf || op == 0x499;
         uses_uniform_bank |= op == 0x3c4 || op == 0x2bd || op == 0x896 || op == 0xf60 || op == 0xc11 || op == 0xd08 || op == 0xc0c || op == 0x986 || op == 0x9a8 || op == 0xc12 || op == 0xc17 || op == 0xe24 || op == 0xc24 || op == 0xd00 || op == 0xd09 || op == 0x9c3 || op == 0xc45 || op == 0x2a4 || op == 0x891 || op == 0x890 || op == 0x290 || op == 0x28c || op == 0x88c || op == 0x287 || op == 0x887 || op == 0x958 || op == 0xab9 || op == 0xabb || op == 0x899 || op == 0xc20 || op == 0xe21 || op == 0xe23 || op == 0xc02 ||
-                             op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || (op == 0x988 && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xf63 || op == 0xf66 || op == 0xf69 || op == 0xc0b || op == 0x8a5 || op == 0x299 || op == 0xc09 || op == 0xc07 || op == 0xf6c || (op == 0x81c && instruction.Bits(67, 1)) || op == 0xc0a ||
+                             op == 0x886 || op == 0x3c2 || op == 0xc82 || op == 0x882 || op == 0x292 || op == 0x892 || op == 0x291 || op == 0x981 || op == 0xc13 || op == 0xc10 || op == 0xc23 || op == 0x526 || op == 0x2be || op == 0x8a4 || op == 0xd05 || (op == 0x984 && instruction.Bits(91, 1)) || (op == 0x988 && instruction.Bits(91, 1)) || ((op == 0x983 || op == 0x987) && instruction.Bits(91, 1)) || op == 0x89c || op == 0x883 || op == 0x2a5 || op == 0xd06 || op == 0xf63 || op == 0xf66 || op == 0xf69 || op == 0xc0b || op == 0x8a5 || op == 0x299 || op == 0xc09 || op == 0xc07 || op == 0xf6c || (op == 0x81c && instruction.Bits(67, 1)) || op == 0xc0a ||
                              (op == 0x83b && instruction.Bits(91, 1)) ||
                              (op == 0x98e && instruction.Bits(91, 1));
     }
@@ -2834,19 +2838,35 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
             result.instructions.push_back(translated);
             break;
         }
-        case 0x387: case 0x983: { // Local spill at [Ra + immediate byte offset].
+        case 0x387: case 0x983: case 0x987: { // Local spill at [Ra + immediate byte offset].
             // The size is bits 73-75 (0-3 = U8, S8, U16, S16, then 4, 5, 6 = 32, 64, 128 bits), as
             // Maxwell's; wider accesses become 32-bit ones. A load's bit 85 (.LU) is a cache hint.
-            const bool store = opcode == 0x387;
+            // Bit 91 adds a uniform register, in bits 32-39 for the load and 64-71 for the store
+            // (0x987), as LDS/STS do (Kirby Air Riders' menu fragment shaders:
+            // STL.128 [UR8+0x40], R4 and LDL R51, [UR8+0x6c]).
+            const bool store = opcode != 0x983;
+            const bool uniform_base = opcode != 0x387 && insn.Bits(91, 1);
+            const u32 base_register = uniform_base ? uniform_register(insn.Bits(store ? 64 : 32, 8))
+                                                   : opcode == 0x987 ? ~0U : 255U;
             const u32 size = insn.Bits(73, 3);
-            const u32 data = insn.Bits(32, 8), offset = insn.Bits(40, 24), address = insn.Bits(24, 8);
+            const u32 data = store || !uniform_base ? insn.Bits(32, 8) : 0U, offset = insn.Bits(40, 24);
+            u32 address = insn.Bits(24, 8);
             const u32 words = size == 6 ? 4 : size == 5 ? 2 : 1, value = store ? data : static_cast<u32>(dest);
             const u32 alignment = size < 2 ? 1U : size < 4 ? 2U : 4U;
             if ((address != 255 && address >= 246) || (store && insn.Bits(16, 8)) || (!store && data) ||
                 (value != 255 && (value + words > 248 || (value & (words - 1)))) || (!store && value == 255) ||
                 (offset & (alignment - 1)) || offset + 4 * words > 0x800000 || size > 6 ||
-                (insn.words[2] & ~(store ? 0xe00U : 0x200e00U)) != 0x00100000U)
+                (insn.words[2] & ~(store ? 0xe00U : 0x200e00U) & ~(uniform_base ? (store ? 0x080000ffU : 0x08000000U) : 0U)) != 0x00100000U ||
+                base_register == ~0U)
                 return fail(index, "native local scalar spill mode");
+            if (base_register != 255) {
+                if (address == 255) {
+                    address = base_register;
+                } else {
+                    emit(0x5c10000000000000ULL | predicate | 250 | (u64{address} << 8) | (u64{base_register} << 20));
+                    address = 250;
+                }
+            }
             for (u32 word = 0; word < words; ++word)
                 emit((store ? 0xef50000000000000ULL : 0xef40000000000000ULL) | predicate |
                      (value == 255 ? 255U : value + word) | (u64{address} << 8) |
@@ -3259,7 +3279,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32 
                 emit(base(0x3828000000000000ULL) | (u64{insn.Bits(24, 8)} << 8) | (u64{insn.words[1]} << 20));
                 break;
             }
-            if ((insn.Bits(73, 2) != 3 && !is_signed) || insn.Bits(75, 1) || !insn.Bits(80, 1) || insn.words[1] > 32) return fail(index, "native funnel-shift mode");
+            // A left shift by at most 32 gives the same high word for U64 as for U32 (Kirby Air
+            // Riders' menu fragment shaders: SHF.L.U64.HI R15, R16, 0x10, R15).
+            const bool left_u64 = insn.Bits(73, 2) == 1 && !insn.Bits(76, 1);
+            if ((insn.Bits(73, 2) != 3 && !is_signed && !left_u64) || insn.Bits(75, 1) || !insn.Bits(80, 1) || insn.words[1] > 32) return fail(index, "native funnel-shift mode");
             const u32 low = insn.Bits(24, 8), high = insn.Bits(64, 8), shift = insn.words[1];
             if (insn.Bits(76, 1)) {
                 if (low != 255) return fail(index, "native nonzero low right-shift word");
