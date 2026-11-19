@@ -103,6 +103,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x81a: operand(16); operand(24); break;
     case 0x919: operand(16); break;
     case 0x20b: case 0x20c: operand(24); operand(32); break; // FSETP/ISETP: predicate results
+    case 0x80b: operand(24); break; // FSETP with an immediate second source
     case 0x208: operand(16); operand(24); operand(32); break;
     case 0x823: operand(16); operand(24); operand(64); break;
     case 0x245: operand(16); operand(32); break;
@@ -161,7 +162,7 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         const u32 width = input.Bits(73, 3), count = width == 6 ? 4 : width == 5 ? 2 : 1;
         operand(32, count); operand(24); break;
     }
-    case 0x981: case 0x986: {
+    case 0x386: case 0x981: case 0x986: { // 0x386: STG with a register address
         const u32 width = input.Bits(73, 3), count = width == 6 ? 4 : width == 5 ? 2 : 1;
         operand(opcode == 0x981 ? 16 : 32, count);
         operand(24, input.Bits(72, 1) ? 2 : 1); break;
