@@ -504,8 +504,26 @@ void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argume
     case RootTables::SelectMethod:
         root_tables.selected = argument & 7;
         root_tables.offset = (argument >> 8) & 0xff;
+        if (static std::array<u64, 64> logged{}; true) {
+            // Diagnostics: the first select of each distinct argument (layout of the tables).
+            static u32 count{};
+            if (count < logged.size() &&
+                std::find(logged.begin(), logged.begin() + count, u64{argument} + 1) ==
+                    logged.begin() + count) {
+                logged[count++] = u64{argument} + 1;
+                LOG_INFO(HW_GPU, "Root table select {:#x}: table {} offset {:#x}", argument,
+                         argument & 7, (argument >> 8) & 0xff);
+            }
+        }
         return;
     case RootTables::LoadMethod:
+        if (root_tables.offset % 4 != 0 || root_tables.offset >= 256) {
+            static u32 dropped{};
+            if (++dropped <= 16) {
+                LOG_WARNING(HW_GPU, "Root table {} load {:#x} at offset {:#x} dropped",
+                            root_tables.selected, argument, root_tables.offset);
+            }
+        }
         if (root_tables.offset < 256 && root_tables.offset % 4 == 0) {
             root_tables.tables[root_tables.selected][root_tables.offset / 4] = argument;
             root_tables.loaded = true;

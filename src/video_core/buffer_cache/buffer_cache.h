@@ -1588,6 +1588,19 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         channel_state->uniform_buffers[stage][index].size == 0) {
         const auto& words = maxwell3d->root_tables.tables[0];
         const u32 size = (*channel_state->uniform_buffer_sizes)[stage][index];
+        {
+            // Diagnostics: the first 48 distinct contents of the push constants a draw reads.
+            static std::vector<u64> seen;
+            u64 hash = 1469598103934665603ULL;
+            for (size_t i = 0; i < 16; ++i) {
+                hash = (hash ^ words[i]) * 1099511628211ULL;
+            }
+            if (seen.size() < 48 && std::find(seen.begin(), seen.end(), hash) == seen.end()) {
+                seen.push_back(hash);
+                LOG_INFO(HW_GPU, "Push constants (bank 24) stage {} size {:#x}: {:08x}", stage, size,
+                         fmt::join(words.begin(), words.begin() + 16, " "));
+            }
+        }
         const u32 copied = (std::min)(size, static_cast<u32>(sizeof(words)));
         if constexpr (IS_OPENGL) {
             std::array<u8, sizeof(words)> data{};
