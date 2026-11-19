@@ -26,6 +26,8 @@ public:
         Word pc;
         std::size_t consumed;
         std::string_view error;
+        /// The macro read more parameters than it was given: those reads returned 0.
+        bool starved{};
     };
 
     // One instruction's fields, decoded once and reused while its words stay the same (macro
@@ -92,6 +94,7 @@ public:
         if (decoded.size() < code.size() / 3) decoded.resize(code.size() / 3);
         read_registers = false;
         reread_data_ram = false;
+        bool starved = false;
         data_ram_reads.clear();
         data_ram_writes.clear();
         for (Word steps = 0; steps < 1000000; ++steps) {
@@ -105,7 +108,9 @@ public:
             std::array<Word, 2> load{}, alu{};
             for (Word i = 0; i < 2; ++i) {
                 if (d.load[i]) {
-                    if (consumed >= parameters.size()) { fail("parameter FIFO underflow"); break; }
+                    // Reading past the parameters returns 0 instead of failing the call, so a
+                    // macro given too few parameters still finishes (Kirby Air Riders' 0xe0c).
+                    if (consumed >= parameters.size()) { load[i] = 0; starved = true; continue; }
                     load[i] = parameters[consumed++];
                 }
             }
@@ -247,7 +252,7 @@ public:
                 }
             }
             if (!error.empty()) break;
-            if (end_next || stopped) return {true, pc, consumed, {}};
+            if (end_next || stopped) return {true, pc, consumed, {}, starved};
             end_next = d.end && !branch_cancels_end;
             if (loop_count && pc == loop_end) { --loop_count; next_pc = loop_start + 1; }
             pc = next_pc;

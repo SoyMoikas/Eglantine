@@ -145,6 +145,7 @@ public:
         state.loop_count = 0;
         state.consumed = 0;
         state.end_next = state.stopped = 0;
+        state.pad = 0;
         if (!keep) {
             // A kept State holds these from its last call: none is read before the call writes
             // it. cancel_end and next_pc are set first by every flow instruction, scratch_x/y
@@ -177,7 +178,7 @@ public:
             kept_busy = false;
         }
         if (error == None) {
-            return {true, state.fail_pc, state.consumed, {}};
+            return {true, state.fail_pc, state.consumed, {}, state.pad != 0};
         }
         return {false, state.fail_pc, state.consumed, ErrorText(error)};
     }
@@ -378,13 +379,21 @@ private:
                     xor_(load, load);
                     continue;
                 }
+                // Past the parameters a load reads 0 and marks the call starved (`pad`), as the
+                // interpreter does.
+                Xbyak::Label empty, loaded;
                 mov(eax, dword[st + offsetof(State, consumed)]);
                 cmp(eax, dword[st + offsetof(State, params_size)]);
-                jae(fail_underflow, T_NEAR);
+                jae(empty, T_NEAR);
                 mov(rcx, qword[st + offsetof(State, params)]);
                 mov(load, dword[rcx + rax * 4]);
                 inc(eax);
                 mov(dword[st + offsetof(State, consumed)], eax);
+                jmp(loaded, T_NEAR);
+                L(empty);
+                xor_(load, load);
+                mov(byte[st + offsetof(State, pad)], 1);
+                L(loaded);
             }
             if (!d.pred_mode) {
                 Body(pc, count, d, 15);

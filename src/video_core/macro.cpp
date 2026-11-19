@@ -1500,6 +1500,13 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                 emit);
             last_consumed = result.consumed;
             last_underflow = !result.success && result.error == "parameter FIFO underflow";
+            if (result.starved) {
+                static u64 starved{};
+                if (++starved <= 16) {
+                    LOG_INFO(HW_GPU, "Native MME start={:#x} read past its {} parameters (zeros read; {} so far)",
+                             method, parameters.size(), starved);
+                }
+            }
             if (!result.success) {
                 native_execution_failed = true;
                 LOG_ERROR(HW_GPU, "Native MME (JIT) failed: start={:#x}, consumed={}/{}, error={}",
