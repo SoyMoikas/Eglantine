@@ -1351,6 +1351,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                           std::span<const u32> parameters) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
     last_consumed = parameters.size();
+    last_underflow = false;
     if (native_turing) {
         maxwell3d.RefreshParameters();
         const auto context = reinterpret_cast<std::uintptr_t>(this);
@@ -1498,6 +1499,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                 },
                 emit);
             last_consumed = result.consumed;
+            last_underflow = !result.success && result.error == "parameter FIFO underflow";
             if (!result.success) {
                 native_execution_failed = true;
                 LOG_ERROR(HW_GPU, "Native MME (JIT) failed: start={:#x}, consumed={}/{}, error={}",
@@ -1556,6 +1558,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                               native_interpreter.data_ram_writes, native_writes);
         }
         last_consumed = result.consumed;
+        last_underflow = !result.success && result.error == "parameter FIFO underflow";
         if (!result.success) {
             native_execution_failed = true;
             if (static const bool diagnostics = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;

@@ -263,9 +263,16 @@ void Maxwell3D::ProcessMacro(Core::System& system, u32 method, const u32* base_s
         std::array<u32, 64> parameters;
         std::copy_n(base_start, amount, parameters.begin());
         ConsumeSink(system);
-        CallMacroMethod(system, executing_macro, std::span<const u32>{parameters.data(), amount});
+        const u32 call_method = executing_macro;
+        CallMacroMethod(system, call_method, std::span<const u32>{parameters.data(), amount});
         macro_segments.clear();
         current_macro_dirty = false;
+        if (MacroCallWaits(amount)) {
+            macro_params.assign(parameters.begin(), parameters.begin() + amount);
+            macro_param_methods.assign(amount, call_method + 1);
+            macro_param_methods[0] = call_method;
+            WaitForMoreMacroParameters(call_method);
+        }
         return;
     }
     macro_params.insert(macro_params.end(), base_start, base_start + amount);
@@ -274,28 +281,79 @@ void Maxwell3D::ProcessMacro(Core::System& system, u32 method, const u32* base_s
     // Call the macro when there are no more parameters in the command buffer
     if (is_last_call) {
         ConsumeSink(system);
+        // Where the call that still waits for parameters starts in macro_params, if one does.
+        size_t waiting = macro_params.size();
+        const u32 call_method = executing_macro;
         if (macro_run_chained) {
-            CallChainedMacros(system);
+            waiting = CallChainedMacros(system);
         } else {
-            CallMacroMethod(system, executing_macro, macro_params);
+            CallMacroMethod(system, call_method, macro_params);
+            if (MacroCallWaits(macro_params.size())) {
+                waiting = 0;
+            }
         }
-        macro_params.clear();
-        macro_param_methods.clear();
         macro_segments.clear();
         macro_run_chained = false;
         current_macro_dirty = false;
+        macro_call_waiting = false;
+        if (waiting < macro_params.size()) {
+            macro_params.erase(macro_params.begin(), macro_params.begin() + waiting);
+            macro_param_methods.erase(macro_param_methods.begin(),
+                                      macro_param_methods.begin() + waiting);
+            WaitForMoreMacroParameters(macro_param_methods.front());
+            return;
+        }
+        macro_params.clear();
+        macro_param_methods.clear();
     }
 }
 
-void Maxwell3D::CallChainedMacros(Core::System& system) {
+bool Maxwell3D::MacroCallWaits(size_t words) {
+    // A macro reads its parameters as the methods arrive: when it needs more than this method
+    // run wrote (Kirby Air Riders' macro 0xe0c gets its second word in the next run), it waits.
+    const auto& engine = GetNativeMacroEngine();
+    return engine.native_turing && engine.last_underflow && engine.last_consumed >= words &&
+           words < 1024;
+}
+
+void Maxwell3D::WaitForMoreMacroParameters(u32 call_method) {
+    // The call runs again, from its first word, once the next run ends. Its words are kept as
+    // they are now (segment 0: RefreshParameters doesn't reread them).
+    executing_macro = call_method;
+    macro_call_waiting = true;
+    macro_segments.clear();
+    macro_segments.emplace_back(0, static_cast<u32>(macro_params.size()));
+    static u64 waits{};
+    if (++waits <= 16) {
+        LOG_INFO(HW_GPU, "Macro call {:#x} waits for more parameters after {} ({} so far)",
+                 call_method, macro_params.size(), waits);
+    }
+}
+
+void Maxwell3D::AbandonWaitingMacroCall(u32 method) {
+    static u64 abandoned{};
+    if (++abandoned <= 16) {
+        LOG_WARNING(HW_GPU,
+                    "Macro call {:#x} waited for parameters, but method {:#x} came next ({} so far)",
+                    executing_macro, method, abandoned);
+    }
+    executing_macro = 0;
+    macro_call_waiting = false;
+    macro_params.clear();
+    macro_param_methods.clear();
+    macro_segments.clear();
+}
+
+size_t Maxwell3D::CallChainedMacros(Core::System& system) {
     // The macro started by a call method reads its parameters from the words that follow,
     // whichever register they went to; the next word nobody read starts the next call.
     auto& engine = GetNativeMacroEngine();
     const std::span<const u32> words{macro_params};
     if (macro_param_methods.size() != words.size()) {
         CallMacroMethod(system, executing_macro, words);
-        return;
+        return words.size();
     }
+    size_t waiting = words.size();
     static u64 runs{};
     static u64 leftovers{};
     const bool log_run = ++runs <= 16;
@@ -325,12 +383,18 @@ void Maxwell3D::CallChainedMacros(Core::System& system) {
         if (log_run) {
             trace += fmt::format(" {:#x}:{}/{}", method, read, next_call - index);
         }
+        if (native && MacroCallWaits(words.size() - index)) {
+            // The run's last call reads past its end: it waits for the next run's words.
+            waiting = index;
+            break;
+        }
         index += (std::max<size_t>)(read, 1);
     }
     if (log_run) {
         LOG_INFO(HW_GPU, "Chained macro run of {} words (call:read/until next call):{}",
                  words.size(), trace);
     }
+    return waiting;
 }
 
 void Maxwell3D::RefreshParametersImpl() {
@@ -797,9 +861,12 @@ void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argu
     // it has finished execution.
     // A write to another macro's call method is allowed: ProcessMacro collects the whole run and
     // CallChainedMacros splits it.
+    if (macro_call_waiting && method < MacroRegistersStart) {
+        AbandonWaitingMacroCall(method);
+    }
     if (executing_macro != 0 && method != executing_macro + 1 &&
         !StartsAnotherMacro(executing_macro, method) &&
-        !(macro_run_chained && method >= MacroRegistersStart)) {
+        !((macro_run_chained || macro_call_waiting) && method >= MacroRegistersStart)) {
         DumpRecentWrites(method);
         ASSERT(method == executing_macro + 1);
     }
@@ -873,6 +940,9 @@ void Maxwell3D::CallMultiMethod(Core::System& system, u32 method, const u32* bas
     if (method >= MacroRegistersStart) {
         ProcessMacro(system, method, base_start, amount, amount == methods_pending);
         return;
+    }
+    if (macro_call_waiting) [[unlikely]] {
+        AbandonWaitingMacroCall(method);
     }
     // As in ProcessDirtyRegisters: the paths below write without it.
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
@@ -1571,6 +1641,7 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
         macro_params.clear();
         macro_param_methods.clear();
         macro_run_chained = false;
+        macro_call_waiting = false;
         executing_macro = 0;
         front_macros = true;
     }
@@ -1585,6 +1656,7 @@ void Maxwell3D::ReleaseFront() {
     macro_params = std::move(front->parameters);
     macro_param_methods.assign(macro_params.size(), executing_macro + 1);
     macro_run_chained = false;
+    macro_call_waiting = false;
     std::memcpy(shadow_state.reg_array.data(), front->shadow.data(), sizeof(front->shadow));
     shadow_state.shadow_ram_control = front->control;
     front.reset();

@@ -3313,8 +3313,18 @@ private:
 
     void ProcessMacro(Core::System& system, u32 method, const u32* base_start, u32 amount, bool is_last_call);
 
-    /// Runs a method run that calls several macros, see ProcessMacro.
-    void CallChainedMacros(Core::System& system);
+    /// Runs a method run that calls several macros, see ProcessMacro. Returns where the call
+    /// that waits for more parameters starts in macro_params (its size when none does).
+    size_t CallChainedMacros(Core::System& system);
+
+    /// Whether the macro call that just ran read past its `words` parameters.
+    bool MacroCallWaits(size_t words);
+
+    /// Keeps macro_params, a call of `call_method` that waits for the next run's parameters.
+    void WaitForMoreMacroParameters(u32 call_method);
+
+    /// Drops the waiting call: `method`, not a parameter, came next.
+    void AbandonWaitingMacroCall(u32 method);
 
     u32 ProcessShadowRam(u32 method, u32 argument);
 
@@ -3419,6 +3429,8 @@ private:
     std::vector<u32> macro_param_methods;
     /// The method run being collected calls more than one macro.
     bool macro_run_chained = false;
+    /// macro_params hold a call that read past its parameters and runs again with more.
+    bool macro_call_waiting = false;
 
     /// Interpreter for the macro codes uploaded to the GPU.
     std::shared_ptr<NativeMacroContext> native_macro_context;
