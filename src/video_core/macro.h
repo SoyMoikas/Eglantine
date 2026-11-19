@@ -259,6 +259,8 @@ struct MacroEngine {
     bool is_interpreted;
     bool native_turing{};
     bool native_execution_failed{};
+    /// Parameters the last native macro call read from its FIFO (all of them for other calls).
+    std::size_t last_consumed{};
     u32 native_write_offset{};
     std::array<u32, 0x8000> native_code{};
     TuringMacroInterpreter native_interpreter;

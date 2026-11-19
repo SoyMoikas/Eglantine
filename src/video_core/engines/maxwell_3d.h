@@ -3313,6 +3313,9 @@ private:
 
     void ProcessMacro(Core::System& system, u32 method, const u32* base_start, u32 amount, bool is_last_call);
 
+    /// Runs a method run that calls several macros, see ProcessMacro.
+    void CallChainedMacros(Core::System& system);
+
     u32 ProcessShadowRam(u32 method, u32 argument);
 
     void ProcessDirtyRegisters(u32 method, u32 argument);
@@ -3412,6 +3415,10 @@ private:
     void DumpRecentWrites(u32 method);
     /// Parameters that have been submitted to the macro call so far.
     std::vector<u32> macro_params;
+    /// The method each word of macro_params was written to.
+    std::vector<u32> macro_param_methods;
+    /// The method run being collected calls more than one macro.
+    bool macro_run_chained = false;
 
     /// Interpreter for the macro codes uploaded to the GPU.
     std::shared_ptr<NativeMacroContext> native_macro_context;

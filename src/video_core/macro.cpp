@@ -1350,6 +1350,7 @@ static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
 void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u32 method,
                           std::span<const u32> parameters) {
     VideoCommon::Nx2Profile::Scope profile_scope{VideoCommon::Nx2Profile::Zone::Macro};
+    last_consumed = parameters.size();
     if (native_turing) {
         maxwell3d.RefreshParameters();
         const auto context = reinterpret_cast<std::uintptr_t>(this);
@@ -1496,6 +1497,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
                     return address < Maxwell3D::Regs::NUM_REGS ? maxwell3d.GetRegisterValue(address) : 0U;
                 },
                 emit);
+            last_consumed = result.consumed;
             if (!result.success) {
                 native_execution_failed = true;
                 LOG_ERROR(HW_GPU, "Native MME (JIT) failed: start={:#x}, consumed={}/{}, error={}",
@@ -1553,6 +1555,7 @@ void MacroEngine::Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u
             native_memo.Store(method, parameters, native_interpreter.data_ram_reads,
                               native_interpreter.data_ram_writes, native_writes);
         }
+        last_consumed = result.consumed;
         if (!result.success) {
             native_execution_failed = true;
             if (static const bool diagnostics = std::getenv("EDEN_NATIVE_DRAW_DIAGNOSTICS") != nullptr;

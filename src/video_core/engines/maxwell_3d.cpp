@@ -236,13 +236,10 @@ constexpr bool StartsAnotherMacro(u32 executing_macro, u32 method) {
 void Maxwell3D::ProcessMacro(Core::System& system, u32 method, const u32* base_start, u32 amount, bool is_last_call) {
     if (StartsAnotherMacro(executing_macro, method)) {
         // An incrementing run can call several macros back to back (Kirby Air Riders:
-        // 0xe10, 0xe11, 0xe12, ...): a write to another macro's call method ends the
-        // current call, which runs with the parameters collected so far.
-        ConsumeSink(system);
-        CallMacroMethod(system, executing_macro, macro_params);
-        macro_params.clear();
-        macro_segments.clear();
-        current_macro_dirty = false;
+        // 0xe10, 0xe11, 0xe12, ...). Where one call ends depends on how many parameters its
+        // macro reads, not on which register a word went to, so the whole run is collected
+        // and split when it ends (CallChainedMacros).
+        macro_run_chained = true;
     }
     if (executing_macro == 0) {
         // A macro call must begin by writing the macro method's register, not its argument.
@@ -272,14 +269,67 @@ void Maxwell3D::ProcessMacro(Core::System& system, u32 method, const u32* base_s
         return;
     }
     macro_params.insert(macro_params.end(), base_start, base_start + amount);
+    macro_param_methods.insert(macro_param_methods.end(), amount, method);
 
     // Call the macro when there are no more parameters in the command buffer
     if (is_last_call) {
         ConsumeSink(system);
-        CallMacroMethod(system, executing_macro, macro_params);
+        if (macro_run_chained) {
+            CallChainedMacros(system);
+        } else {
+            CallMacroMethod(system, executing_macro, macro_params);
+        }
         macro_params.clear();
+        macro_param_methods.clear();
         macro_segments.clear();
+        macro_run_chained = false;
         current_macro_dirty = false;
+    }
+}
+
+void Maxwell3D::CallChainedMacros(Core::System& system) {
+    // The macro started by a call method reads its parameters from the words that follow,
+    // whichever register they went to; the next word nobody read starts the next call.
+    auto& engine = GetNativeMacroEngine();
+    const std::span<const u32> words{macro_params};
+    if (macro_param_methods.size() != words.size()) {
+        CallMacroMethod(system, executing_macro, words);
+        return;
+    }
+    static u64 runs{};
+    static u64 leftovers{};
+    const bool log_run = ++runs <= 16;
+    std::string trace;
+    size_t index = 0;
+    while (index < words.size()) {
+        const u32 method = macro_param_methods[index];
+        if (method % 2 != 0) {
+            if (++leftovers <= 32) {
+                LOG_WARNING(HW_GPU, "Macro parameter {:#x}={:#x} left over in a chained run ({} so far)",
+                            method, words[index], leftovers);
+            }
+            ++index;
+            continue;
+        }
+        size_t next_call = index + 1;
+        while (next_call < words.size() && macro_param_methods[next_call] % 2 != 0) {
+            ++next_call;
+        }
+        // Macros that are not run natively don't report what they read: give them the words up
+        // to the next call method.
+        const bool native = engine.native_turing;
+        ConsumeSink(system);
+        CallMacroMethod(system, method,
+                        native ? words.subspan(index) : words.subspan(index, next_call - index));
+        const size_t read = native ? engine.last_consumed : next_call - index;
+        if (log_run) {
+            trace += fmt::format(" {:#x}:{}/{}", method, read, next_call - index);
+        }
+        index += (std::max<size_t>)(read, 1);
+    }
+    if (log_run) {
+        LOG_INFO(HW_GPU, "Chained macro run of {} words (call:read/until next call):{}",
+                 words.size(), trace);
     }
 }
 
@@ -745,9 +795,11 @@ size_t Maxwell3D::CallStateMethodRun(const u64* entry, size_t max_words) {
 void Maxwell3D::CallMethodSlow(Core::System& system, u32 method, u32 method_argument, bool is_last_call) {
     // It is an error to write to a register other than the current macro's ARG register before
     // it has finished execution.
-    // A write to another macro's call method is allowed: ProcessMacro runs the current call first.
+    // A write to another macro's call method is allowed: ProcessMacro collects the whole run and
+    // CallChainedMacros splits it.
     if (executing_macro != 0 && method != executing_macro + 1 &&
-        !StartsAnotherMacro(executing_macro, method)) {
+        !StartsAnotherMacro(executing_macro, method) &&
+        !(macro_run_chained && method >= MacroRegistersStart)) {
         DumpRecentWrites(method);
         ASSERT(method == executing_macro + 1);
     }
@@ -1517,6 +1569,8 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
         front->executing_macro = executing_macro;
         front->parameters = std::move(macro_params);
         macro_params.clear();
+        macro_param_methods.clear();
+        macro_run_chained = false;
         executing_macro = 0;
         front_macros = true;
     }
@@ -1529,6 +1583,8 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
 void Maxwell3D::ReleaseFront() {
     executing_macro = front->executing_macro;
     macro_params = std::move(front->parameters);
+    macro_param_methods.assign(macro_params.size(), executing_macro + 1);
+    macro_run_chained = false;
     std::memcpy(shadow_state.reg_array.data(), front->shadow.data(), sizeof(front->shadow));
     shadow_state.shadow_ram_control = front->control;
     front.reset();
