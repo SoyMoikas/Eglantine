@@ -98,6 +98,8 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
     case 0x433: case 0x633: operand(16); operand(24); break;
     case 0x220: case 0x221: operand(16); operand(24); operand(32); break;
     case 0x421: case 0x817: case 0x820: operand(16); operand(24); break;
+    case 0x807: operand(16); operand(24); break; // SEL with an immediate second source
+    case 0x305: case 0x307: operand(16); operand(32); break; // F2I and FRND, register source
     case 0x81a: operand(16); operand(24); break;
     case 0x919: operand(16); break;
     case 0x20b: case 0x20c: operand(24); operand(32); break; // FSETP/ISETP: predicate results
