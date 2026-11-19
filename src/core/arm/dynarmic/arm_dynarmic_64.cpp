@@ -7,14 +7,20 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstring>
+#include <string>
 #include <cstdlib>
 #include <mutex>
 #include <thread>
 #if defined(_M_X64) || defined(__x86_64__)
 #include <immintrin.h>
 #endif
+#include <fmt/format.h>
 #include "common/cpu_features.h"
+#include "common/guest_write_log.h"
 #include "common/settings.h"
 #include "core/arm/dynarmic/arm_dynarmic.h"
 #include "core/arm/dynarmic/arm_dynarmic_64.h"
@@ -28,6 +34,45 @@
 namespace Core {
 
 using namespace Common::Literals;
+
+namespace {
+/// A read from an address no guest mapping can have (past the 39-bit address space) is a pointer
+/// loaded from corrupted data. Logs the guest registers that point at memory and the emulator's
+/// last writes to that memory, to find what wrote over the data (first two times only).
+void ReportCorruptPointer(Core::Memory::Memory& memory, Dynarmic::A64::Jit& jit, u64 vaddr) {
+    static std::atomic<u32> reports{};
+    if (vaddr < (1ULL << 39) || reports.fetch_add(1) >= 2) {
+        return;
+    }
+    LOG_ERROR(Core_ARM, "Corrupt pointer {:#x} read at pc {:#x} lr {:#x}; registers that point at "
+                        "guest memory and the emulator's last writes near them:",
+              vaddr, jit.GetPC(), jit.GetRegister(30));
+    for (int index = 0; index <= 31; ++index) {
+        const u64 value = index == 31 ? jit.GetSP() : jit.GetRegister(index);
+        if (value < 0x1000 || !memory.IsValidVirtualAddress(value)) {
+            continue;
+        }
+        u8* const host = memory.GetPointerSilent(value);
+        if (host == nullptr) {
+            continue;
+        }
+        std::array<u64, 4> words{};
+        const size_t page_room = Core::Memory::YUZU_PAGESIZE - (value & Core::Memory::YUZU_PAGEMASK);
+        std::memcpy(words.data(), host, (std::min<size_t>)(sizeof(words), page_room));
+        LOG_ERROR(Core_ARM, "  {} = {:#x}: {:016x} {:016x} {:016x} {:016x}",
+                  index == 31 ? std::string{"SP"} : fmt::format("X{}", index), value, words[0],
+                  words[1], words[2], words[3]);
+        Common::GuestWriteLog::Find(
+            host - 0x100, 0x300, 6, [&](const Common::GuestWriteLog::Entry& entry, u64 writes_ago) {
+                LOG_ERROR(Core_ARM, "    {} to {:#x} ({} bytes, at {:+#x} from X), {} writes ago",
+                          Common::GuestWriteLog::SourceName(entry.source), entry.address,
+                          entry.size,
+                          static_cast<s64>(entry.host - reinterpret_cast<std::uintptr_t>(host)),
+                          writes_ago);
+            });
+    }
+}
+} // namespace
 
 DynarmicCallbacks64::DynarmicCallbacks64(ArmDynarmic64& parent, Kernel::KProcess* process)
     : m_parent{parent}, m_memory(process->GetMemory())
@@ -53,6 +98,7 @@ u64 DynarmicCallbacks64::MemoryRead(u64 vaddr, size_t size) {
             LOG_ERROR(Core_ARM, "Unmapped read {:#x} ({} bytes) at pc {:#x} lr {:#x} sp {:#x}", vaddr, size,
                       m_parent.m_jit->GetPC(), m_parent.m_jit->GetRegister(30), m_parent.m_jit->GetSP());
         }
+        ReportCorruptPointer(m_memory, *m_parent.m_jit, vaddr);
     }
     return value;
 }

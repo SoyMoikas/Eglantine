@@ -22,6 +22,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/div_ceil.h"
+#include "common/guest_write_log.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
@@ -452,6 +453,7 @@ void DeviceMemoryManager<Traits>::Write(DAddr address, T value) {
         return;
     }
     std::memcpy(ptr, &value, sizeof(T));
+    Common::GuestWriteLog::Note(ptr, sizeof(T), address, Common::GuestWriteLog::DeviceWrite);
 }
 
 template <typename Traits>
@@ -551,6 +553,8 @@ void DeviceMemoryManager<Traits>::WriteBlock(DAddr address, const void* src_poin
         },
         [&](size_t copy_amount, u8* const dst_ptr) {
             std::memcpy(dst_ptr, src_pointer, copy_amount);
+            Common::GuestWriteLog::Note(dst_ptr, copy_amount, address,
+                                        Common::GuestWriteLog::DeviceWriteBlock);
         },
         [&](const std::size_t copy_amount) {
             src_pointer = static_cast<const u8*>(src_pointer) + copy_amount;
@@ -617,6 +621,8 @@ void DeviceMemoryManager<Traits>::WriteBlockUnsafe(DAddr address, const void* sr
         },
         [&](size_t copy_amount, u8* const dst_ptr) {
             std::memcpy(dst_ptr, src_pointer, copy_amount);
+            Common::GuestWriteLog::Note(dst_ptr, copy_amount, address,
+                                        Common::GuestWriteLog::DeviceWriteUnsafe);
         },
         [&](const std::size_t copy_amount) {
             src_pointer = static_cast<const u8*>(src_pointer) + copy_amount;

@@ -13,6 +13,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+
+#include "common/guest_write_log.h"
 #include <cstdlib>
 #include <mutex>
 #include <set>
@@ -346,12 +348,16 @@ struct Memory::Impl {
         },
         [&](const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             std::memcpy(ptr, reinterpret_cast<u8 const*>(buffer) + offset, copy_amount);
+            Common::GuestWriteLog::Note(ptr, copy_amount, GetInteger(addr) + offset,
+                                        Common::GuestWriteLog::ServiceWrite);
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             if (!unsafe) {
                 HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount);
             }
             std::memcpy(ptr, reinterpret_cast<u8 const*>(buffer) + offset, copy_amount);
+            Common::GuestWriteLog::Note(ptr, copy_amount, GetInteger(current_vaddr),
+                                        Common::GuestWriteLog::ServiceWrite);
         });
     }
 
@@ -362,10 +368,14 @@ struct Memory::Impl {
         },
         [=](const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             std::memset(ptr, 0, copy_amount);
+            Common::GuestWriteLog::Note(ptr, copy_amount, GetInteger(addr) + offset,
+                                        Common::GuestWriteLog::ServiceZero);
         },
         [&](const Common::ProcessAddress current_vaddr, const std::size_t offset, const std::size_t copy_amount, u8* const ptr) {
             HandleRasterizerWrite(GetInteger(current_vaddr), copy_amount);
             std::memset(ptr, 0, copy_amount);
+            Common::GuestWriteLog::Note(ptr, copy_amount, GetInteger(current_vaddr),
+                                        Common::GuestWriteLog::ServiceZero);
         });
     }
 
